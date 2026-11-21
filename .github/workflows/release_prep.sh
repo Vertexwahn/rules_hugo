@@ -18,7 +18,7 @@ SHA=$(shasum -a 256 $ARCHIVE | awk '{print $1}')
 
 cat << EOF
 ## Using Bzlmod
-Add to your `MODULE.bazel` file:
+Add to your \`MODULE.bazel\` file:
 \`\`\`starlark
 bazel_dep(name = "rules_hugo", version = "${TAG}")
 
