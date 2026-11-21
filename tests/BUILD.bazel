@@ -1,0 +1,14 @@
+load("//hugo:rules.bzl", "hugo_theme")
+
+# Force the Hugo repository to be fetched on every platform. This verifies that
+# the module extension and the platform-specific download logic work.
+filegroup(
+    name = "hugo_binary",
+    srcs = ["@hugo"],
+)
+
+hugo_theme(
+    name = "test_theme",
+    srcs = glob(["theme/**"]),
+    theme_name = "test-theme",
+)
