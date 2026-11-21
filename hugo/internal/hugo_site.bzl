@@ -71,7 +71,7 @@ def _hugo_site_impl(ctx):
         ]
     else:
         placeholder_file = ctx.actions.declare_file(".placeholder")
-        ctx.actions.write(placeholder_file, "paceholder", is_executable = False)
+        ctx.actions.write(placeholder_file, "placeholder", is_executable = False)
         hugo_inputs.append(placeholder_file)
 
         #  placeholder_file.dirname + "/config/_default/config.yaml",
@@ -109,8 +109,8 @@ def _hugo_site_impl(ctx):
             if i.short_path.startswith("../"):
                 o_filename = "/".join(["themes", theme.name] + path_list[2:])
             elif i.short_path[len(theme.path):].startswith("/themes"):  # check if themes is the first dir after theme path
-                indx = path_list.index("themes")
-                o_filename = "/".join(["themes", theme.name] + path_list[indx + 2:])
+                index = path_list.index("themes")
+                o_filename = "/".join(["themes", theme.name] + path_list[index + 2:])
             else:
                 o_filename = "/".join(["themes", theme.name, i.short_path[len(theme.path):]])
             o = ctx.actions.declare_file(o_filename)
