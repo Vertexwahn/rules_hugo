@@ -39,9 +39,19 @@ jobs:
           fail_on_unmatched_files: true
           files: rules_hugo-*.tar.gz
 
+      - name: Upload release artifacts for BCR publishing
+        uses: actions/upload-artifact@v7
+        with:
+          name: release_files
+          path: rules_hugo-*.tar.gz
+          if-no-files-found: error
+
   publish:
     needs: build
     uses: ./.github/workflows/publish.yml
+    permissions:
+      actions: read
+      contents: write
     with:
       tag_name: ${{ github.ref_name }}
     secrets:
