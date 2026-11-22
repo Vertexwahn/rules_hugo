@@ -1,0 +1,2 @@
+# Test theme used by the rules_hugo smoke tests.
+name = "test-theme"

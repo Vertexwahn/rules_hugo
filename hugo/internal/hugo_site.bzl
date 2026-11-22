@@ -1,3 +1,5 @@
+load("//hugo:internal/hugo_theme.bzl", "HugoThemeInfo")
+
 def relative_path(src, dirname):
     """Given a src File and a directory it's under, return the relative path.
 
@@ -27,11 +29,11 @@ def copy_to_dir(ctx, srcs, dirname):
     for i in srcs:
         if i.is_source:
             o = ctx.actions.declare_file(relative_path(i, dirname))
-            ctx.actions.run(
+            ctx.actions.run_shell(
                 inputs = [i],
-                executable = "cp",
-                arguments = ["-r", "-L", i.path, o.path],
                 outputs = [o],
+                command = 'cp -r -L "$1" "$2"',
+                arguments = [i.path, o.path],
             )
             outs.append(o)
         else:
@@ -53,7 +55,7 @@ def _hugo_site_impl(ctx):
 
     if config_dir == None or len(config_dir) == 0:
         config_file = ctx.actions.declare_file(ctx.file.config.basename)
-        
+
         ctx.actions.run_shell(
             inputs = [ctx.file.config],
             outputs = [config_file],
@@ -69,11 +71,13 @@ def _hugo_site_impl(ctx):
         ]
     else:
         placeholder_file = ctx.actions.declare_file(".placeholder")
-        ctx.actions.write(placeholder_file, "paceholder", is_executable=False)
+        ctx.actions.write(placeholder_file, "placeholder", is_executable = False)
         hugo_inputs.append(placeholder_file)
+
         #  placeholder_file.dirname + "/config/_default/config.yaml",
         hugo_args += [
-            "--source", placeholder_file.dirname
+            "--source",
+            placeholder_file.dirname,
         ]
 
     # Copy all the files over
@@ -90,17 +94,23 @@ def _hugo_site_impl(ctx):
     }.items():
         hugo_inputs += copy_to_dir(ctx, srcs, name)
 
-    # Copy the theme
+    # Copy the themes
+    themes = []
     if ctx.attr.theme:
-        theme = ctx.attr.theme.hugo_theme
+        theme = ctx.attr.theme[HugoThemeInfo]
+        themes.append(theme)
         hugo_args += ["--theme", theme.name]
+    for theme_target in ctx.attr.themes:
+        themes.append(theme_target[HugoThemeInfo])
+
+    for theme in themes:
         for i in theme.files.to_list():
             path_list = i.short_path.split("/")
             if i.short_path.startswith("../"):
                 o_filename = "/".join(["themes", theme.name] + path_list[2:])
-            elif i.short_path[len(theme.path):].startswith("/themes"): # check if themes is the first dir after theme path
-                indx = path_list.index("themes")
-                o_filename = "/".join(["themes", theme.name] + path_list[indx+2:])
+            elif i.short_path[len(theme.path):].startswith("/themes"):  # check if themes is the first dir after theme path
+                index = path_list.index("themes")
+                o_filename = "/".join(["themes", theme.name] + path_list[index + 2:])
             else:
                 o_filename = "/".join(["themes", theme.name, i.short_path[len(theme.path):]])
             o = ctx.actions.declare_file(o_filename)
@@ -121,7 +131,7 @@ def _hugo_site_impl(ctx):
     if ctx.attr.quiet:
         hugo_args.append("--quiet")
     if ctx.attr.verbose:
-        hugo_args.append("--verbose")
+        hugo_args += ["--logLevel", "debug"]
     if ctx.attr.base_url:
         hugo_args += ["--baseURL", ctx.attr.base_url]
     if ctx.attr.build_drafts:
@@ -137,7 +147,7 @@ def _hugo_site_impl(ctx):
         tools = [hugo],
         execution_requirements = {
             "no-sandbox": "1",
-        }, 
+        },
     )
 
     files = depset([hugo_outputdir])
@@ -195,18 +205,22 @@ hugo_site = rule(
         # Files to be included in the i18n/ subdir
         "i18n": attr.label_list(
             allow_files = True,
-        ),        
+        ),
         # The hugo executable
         "hugo": attr.label(
             default = "@hugo//:hugo",
             allow_files = True,
             executable = True,
-            cfg = "host",
+            cfg = "exec",
         ),
         # Optionally set the base_url as a hugo argument
         "base_url": attr.string(),
         "theme": attr.label(
-            providers = ["hugo_theme"],
+            providers = [HugoThemeInfo],
+        ),
+        # Additional themes used by Hugo's config theme list.
+        "themes": attr.label_list(
+            providers = [HugoThemeInfo],
         ),
         # Emit quietly
         "quiet": attr.bool(
@@ -233,50 +247,105 @@ function exit_gracefully() {
 }
 
 """
-_SERVE_SCRIPT_TEMPLATE = """{hugo_bin} serve -s $DIR {args}"""
+_SERVE_SCRIPT_TEMPLATE = """{source_check}{hugo_bin} serve -s {source_dir} {args}"""
+
+# Windows cannot execute the bash script, so a batch file is generated instead.
+# Hugo is looked up in the runfiles tree and, when runfiles are disabled (the
+# Windows default), in the runfiles manifest.
+_WINDOWS_SERVE_SCRIPT_TEMPLATE = """@echo off
+setlocal
+{source_check}set "HUGO=%~f0.runfiles\\{hugo_runfiles_path}"
+if not exist "%HUGO%" if exist "%~f0.runfiles_manifest" (
+  for /f "usebackq tokens=1,*" %%a in ("%~f0.runfiles_manifest") do (
+    if "%%a"=="{hugo_rlocation_path}" set "HUGO=%%b"
+  )
+)
+set "HUGO=%HUGO:/=\\%"
+if not exist "%HUGO%" (
+  echo Could not find {hugo_rlocation_path} in the runfiles 1>&2
+  exit /b 1
+)
+"%HUGO%" serve -s {source_dir} {args}
+"""
+
+_WINDOWS_SOURCE_CHECK = """if not defined BUILD_WORKSPACE_DIRECTORY (
+  echo Run this target with bazel run 1>&2
+  exit /b 1
+)
+"""
+
+def _rlocation_path(ctx, file):
+    if file.short_path.startswith("../"):
+        return file.short_path[len("../"):]
+    return ctx.workspace_name + "/" + file.short_path
+
+def _windows_serve_script(ctx, hugo, hugo_args):
+    if ctx.attr.source_dir:
+        source_check = _WINDOWS_SOURCE_CHECK
+        source_dir = '"%BUILD_WORKSPACE_DIRECTORY%/{}"'.format(ctx.attr.source_dir)
+    else:
+        source_check = ""
+
+        # The trailing "." avoids a backslash escaping the closing quote.
+        source_dir = '"%~dp0."'
+    hugo_rlocation_path = _rlocation_path(ctx, hugo)
+    script_content = _WINDOWS_SERVE_SCRIPT_TEMPLATE.format(
+        source_check = source_check,
+        hugo_runfiles_path = hugo_rlocation_path.replace("/", "\\"),
+        hugo_rlocation_path = hugo_rlocation_path,
+        source_dir = source_dir,
+        args = " ".join(hugo_args),
+    )
+
+    # Normalize first: a CRLF checkout of this file leaves "\r" in the template.
+    return script_content.replace("\r\n", "\n").replace("\n", "\r\n")
 
 def _hugo_serve_impl(ctx):
-    """ This is a long running process used for development"""
+    """Runs Hugo against workspace sources for live development updates."""
+    if not ctx.attr.source_dir and not ctx.attr.dep:
+        fail("hugo_serve requires either source_dir or dep")
+
     hugo = ctx.executable.hugo
-    hugo_outfile = ctx.actions.declare_file("{}.out".format(ctx.label.name))
-    hugo_outputs = [hugo_outfile]
     hugo_args = []
 
     if ctx.attr.quiet:
         hugo_args.append("--quiet")
-    if ctx.attr.quiet:
-        hugo_args.append("--verbose")
+    if ctx.attr.verbose:
+        hugo_args += ["--logLevel", "debug"]
     if ctx.attr.disable_fast_render:
         hugo_args.append("--disableFastRender")
 
     executable_path = "./" + ctx.attr.hugo.files_to_run.executable.short_path
 
     runfiles = ctx.runfiles()
-    runfiles = runfiles.merge(ctx.runfiles(files=[ctx.attr.hugo.files_to_run.executable]))
+    runfiles = runfiles.merge(ctx.runfiles(files = [ctx.attr.hugo.files_to_run.executable]))
 
     for dep in ctx.attr.dep:
-        runfiles = runfiles.merge(dep.default_runfiles).merge(dep.data_runfiles).merge(ctx.runfiles(files=dep.files.to_list()))
+        runfiles = runfiles.merge(dep.default_runfiles).merge(dep.data_runfiles).merge(ctx.runfiles(files = dep.files.to_list()))
 
-
-    script = ctx.actions.declare_file("{}-serve".format(ctx.label.name))
-    script_content = _SERVE_SCRIPT_PREFIX + _SERVE_SCRIPT_TEMPLATE.format(
-        hugo_bin=executable_path,
-        args=" ".join(hugo_args),
+    is_windows = ctx.target_platform_has_constraint(
+        ctx.attr._windows_constraint[platform_common.ConstraintValueInfo],
     )
-    ctx.actions.write(output=script, content=script_content, is_executable=True)
+    if is_windows:
+        script = ctx.actions.declare_file("{}-serve.bat".format(ctx.label.name))
+        script_content = _windows_serve_script(ctx, hugo, hugo_args)
+    else:
+        script = ctx.actions.declare_file("{}-serve".format(ctx.label.name))
+        if ctx.attr.source_dir:
+            source_check = 'if [[ -z "${BUILD_WORKSPACE_DIRECTORY:-}" ]]; then echo "Run this target with bazel run" >&2; exit 1; fi\n'
+            source_dir = '"$BUILD_WORKSPACE_DIRECTORY/{}/"'.format(ctx.attr.source_dir)
+        else:
+            source_check = ""
+            source_dir = '"$DIR"'
+        script_content = _SERVE_SCRIPT_PREFIX + _SERVE_SCRIPT_TEMPLATE.format(
+            hugo_bin = executable_path,
+            source_check = source_check,
+            source_dir = source_dir,
+            args = " ".join(hugo_args),
+        )
+    ctx.actions.write(output = script, content = script_content, is_executable = True)
 
-    ctx.actions.run_shell(
-        mnemonic = "GoHugoServe",
-        tools = [script, hugo],
-        command = script.path,
-        outputs = hugo_outputs,
-        execution_requirements={
-            "no-sandbox": "1",
-        },
-    )
-
-    return [DefaultInfo(executable=script, runfiles=runfiles)]
-
+    return [DefaultInfo(executable = script, runfiles = runfiles)]
 
 hugo_serve = rule(
     attrs = {
@@ -285,11 +354,14 @@ hugo_serve = rule(
             default = "@hugo//:hugo",
             allow_files = True,
             executable = True,
-            cfg = "host",
+            cfg = "exec",
         ),
         "dep": attr.label_list(
-            mandatory=True,
+            default = [],
         ),
+        # Workspace-relative site directory to serve directly. Enables Hugo
+        # to watch and rebuild as source files change.
+        "source_dir": attr.string(),
         # Disable fast render
         "disable_fast_render": attr.bool(
             default = False,
@@ -301,6 +373,9 @@ hugo_serve = rule(
         # Emit verbose
         "verbose": attr.bool(
             default = False,
+        ),
+        "_windows_constraint": attr.label(
+            default = "@platforms//os:windows",
         ),
     },
     implementation = _hugo_serve_impl,

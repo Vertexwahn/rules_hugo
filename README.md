@@ -29,6 +29,26 @@
 
 ## Usage
 
+### Using Bzlmod
+
+Add the module and the Hugo binary repository to your `MODULE.bazel`:
+
+```python
+bazel_dep(name = "rules_hugo", version = "0.1.0")
+
+hugo = use_extension("@rules_hugo//hugo:extensions.bzl", "hugo")
+hugo.download(
+    extended = True,
+    sha256 = "c41672a0725d307758a132bc94a962e59760eb33f9ba08c991b81f9881d6fa7d",
+    sha256_darwin = "d48dfd5adab308f941e83e48c5ba925747cf383395972278942cf526ad27cf38",
+    sha256_windows = "396b4c8326dc2dd61c2618f825042781c5ea43e1ac1375a2204a9fde4e98b84c",
+    version = "0.169.0",
+)
+use_repo(hugo, "hugo")
+```
+
+Then load the rules from `@rules_hugo//hugo:rules.bzl` as shown below.
+
 ### Add rules_hugo to your WORKSPACE and add a theme from github
 
 ```python
@@ -164,6 +184,23 @@ bazel run //site_complex:serve
 
 Then open your browser: [here](http://localhost:1313)
 
+For live updates while editing workspace files, point `hugo_serve` at the
+site's workspace-relative source directory. This runs Hugo against the real
+files instead of a staged build output:
+
+```python
+hugo_serve(
+    name = "serve",
+    source_dir = "path/to/site",
+)
+```
+
+`bazel run //path/to/site:serve` then watches changes and rebuilds the preview.
+The existing `dep` mode remains available for serving a staged site.
+
+On Windows, `hugo_serve` generates a batch file instead of a Bash script, so
+`bazel run` can start it directly. It works with and without `--enable_runfiles`.
+
 
 ### Build the site
 
@@ -193,6 +230,24 @@ $ bazel build :basic_tar
 Target //:basic up-to-date:
   bazel-bin/basic_tar.tar
 ```
+
+## Releasing
+
+Pushing a version tag such as `0.1.0` runs the release workflow, builds the
+test targets, creates a GitHub Release, and then opens a draft pull request to
+the [Bazel Central Registry](https://github.com/bazelbuild/bazel-central-registry).
+The BCR presubmit configuration is in `.bcr/presubmit.yml`.
+
+Configure the `BCR_PUBLISH_TOKEN` Actions secret with a classic GitHub personal
+access token that has `repo` and `workflow` permissions. The publish workflow uses
+the `Vertexwahn/bazel-central-registry` fork and can be rerun manually from Actions
+with the release tag if BCR publishing needs to be retried.
+
+The source of truth for these rules is
+[`Vertexwahn/Piper`](https://github.com/Vertexwahn/Piper), directory
+`devertexwahn/bazel/rules/rules_hugo`. This repository is a read-only mirror
+created with Copybara; changes must be made in Piper and synced with
+`copy.bara.sky`.
 
 ## End
 
